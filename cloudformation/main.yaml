@@ -1,0 +1,164 @@
+#1 - Header
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Defines 2 Lambda functions and a shared IAM role."
+#Metadata: ""
+Parameters:
+  LambdaFunctionsS3Bucket:
+    Type: String
+    Description: "S3 Bucket containing all lambda functions for this repository"
+    Default: scansource-lambda-bucket
+
+#Rules: ""
+#Mappings: ""
+#Conditions: ""
+#Transform: ""
+
+#2 - Resources
+Resources:
+  #2.1 - IAM Roles
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  #2.2 - Lambda functions
+  Lambda1:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: NodeFunction
+      Runtime: nodejs20.x
+      Handler: index.handler #filename.functionName
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaFunctionsS3Bucket
+        S3Key: lambda1.zip
+
+  Lambda2:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: PythonFunction
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler #filename.functionName
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaFunctionsS3Bucket
+        S3Key: lambda2.zip
+
+  #2.3 - API Gateway
+  ScansourceAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ScansourceAPI
+      Description: "API Gateway for lambda functions using REST API (PROXY)"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiPathRoot:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ParentId: !GetAtt ScansourceAPI.RootResourceId
+      PathPart: api
+
+  ApiPathV1:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ParentId: !Ref ApiPathRoot
+      PathPart: v1
+
+  ApiPathNode:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ParentId: !Ref ApiPathV1
+      PathPart: node
+
+  EndpointGetNode:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ResourceId: !Ref ApiPathNode
+      HttpMethod: GET
+      AuthorizationType: NONE #TODO - COGNITO
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Lambda1.Arn}/invocations
+
+  ExecuteGetNode:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Lambda1
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/* #TODO - security eval on path
+
+  ApiPathPython:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ParentId: !Ref ApiPathV1
+      PathPart: python
+
+  EndpointGetPython:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      ResourceId: !Ref ApiPathPython
+      HttpMethod: GET
+      AuthorizationType: NONE #TODO - COGNITO
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Lambda2.Arn}/invocations
+
+  ExecuteGetPython:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Lambda2
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/* #TODO - security eval on path
+
+  #2.4 - Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - EndpointGetNode
+      - EndpointGetPython
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      Description: "API Gateway Deployment"
+
+  #2.5 - Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ScansourceAPI
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+      Description: "Production Stage for API Gateway"
+
+#3 - Outputs
+Outputs:
+  ApiEndpointUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  NodeEndpoint:
+    Description: "Node function endpoint"
+    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/node"
+
+  PythonEndpoint:
+    Description: "Python function endpoint"
+    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/python"
