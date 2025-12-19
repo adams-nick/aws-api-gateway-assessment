@@ -4,7 +4,16 @@
   "description": "Stock return calculator using Alpha Vantage API",
   "type": "module",
   "main": "index.mjs",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.705.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0",
+    "@vitest/coverage-v8": "^1.0.0"
   }
 }
