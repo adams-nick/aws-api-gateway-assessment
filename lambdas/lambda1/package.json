@@ -1,0 +1,10 @@
+{
+  "name": "lambda1-stock-calculator",
+  "version": "1.0.0",
+  "description": "Stock return calculator using Alpha Vantage API",
+  "type": "module",
+  "main": "index.mjs",
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.705.0"
+  }
+}

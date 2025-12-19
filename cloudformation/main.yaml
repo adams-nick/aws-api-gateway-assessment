@@ -1,21 +1,44 @@
-#1 - Header
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Defines 2 Lambda functions and a shared IAM role."
-#Metadata: ""
+Description: "API Gateway with Cognito authentication, Lambda functions, and caching"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Infrastructure Configuration"
+        Parameters:
+          - LambdaFunctionsS3Bucket
+      - Label:
+          default: "API Configuration"
+        Parameters:
+          - AlphaVantageApiKey
+    ParameterLabels:
+      LambdaFunctionsS3Bucket:
+        default: "S3 Bucket Name"
+      AlphaVantageApiKey:
+        default: "Alpha Vantage API Key"
+
 Parameters:
   LambdaFunctionsS3Bucket:
     Type: String
-    Description: "S3 Bucket containing all lambda functions for this repository"
+    Description: "S3 Bucket containing lambda functions"
     Default: scansource-lambda-bucket
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: "Bucket name must be lowercase alphanumeric with hyphens"
+    MinLength: 3
+    MaxLength: 63
 
-#Rules: ""
-#Mappings: ""
-#Conditions: ""
-#Transform: ""
+  AlphaVantageApiKey:
+    Type: String
+    Description: "Alpha Vantage API Key (16 alphanumeric characters)"
+    NoEcho: true
+    AllowedPattern: "^[A-Z0-9]{16}$"
+    ConstraintDescription: "Must be exactly 16 uppercase alphanumeric characters"
+    MinLength: 16
+    MaxLength: 16
 
-#2 - Resources
 Resources:
-  #2.1 - IAM Roles
+  #IAM Roles + Account
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -28,39 +51,144 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ApiKeySecret
 
-  #2.2 - Lambda functions
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  #Cognito + Authorizer
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-UserPool"
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UserPoolTags:
+        Project: APIGatewayAssessment
+        ManagedBy: CloudFormation
+        Stack: !Ref AWS::StackName
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: ScansourceAppClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  ApiAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      RestApiId: !Ref ScansourceAPI
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  #Lambda functions
   Lambda1:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: NodeFunction
-      Runtime: nodejs20.x
-      Handler: index.handler #filename.functionName
+      FunctionName: !Sub "${AWS::StackName}-NodeFunction"
+      Runtime: nodejs24.x
+      Handler: index.handler
       Role: !GetAtt LambdaRole.Arn
+      Timeout: 20
+      MemorySize: 256
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref ApiKeySecret
       Code:
         S3Bucket: !Ref LambdaFunctionsS3Bucket
         S3Key: lambda1.zip
+      Tags:
+        - Key: Project
+          Value: APIGatewayAssessment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Stack
+          Value: !Ref AWS::StackName
 
   Lambda2:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: PythonFunction
+      FunctionName: !Sub "${AWS::StackName}-PythonFunction"
       Runtime: python3.12
-      Handler: lambda_function.lambda_handler #filename.functionName
+      Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaRole.Arn
+      Timeout: 20
+      MemorySize: 256
       Code:
         S3Bucket: !Ref LambdaFunctionsS3Bucket
         S3Key: lambda2.zip
+      Tags:
+        - Key: Project
+          Value: APIGatewayAssessment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Stack
+          Value: !Ref AWS::StackName
 
-  #2.3 - API Gateway
+  #API Gateway
   ScansourceAPI:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: ScansourceAPI
+      Name: !Sub "${AWS::StackName}-API"
       Description: "API Gateway for lambda functions using REST API (PROXY)"
       EndpointConfiguration:
         Types:
           - REGIONAL
+      Tags:
+        - Key: Project
+          Value: APIGatewayAssessment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Stack
+          Value: !Ref AWS::StackName
 
   ApiPathRoot:
     Type: AWS::ApiGateway::Resource
@@ -81,7 +209,7 @@ Resources:
     Properties:
       RestApiId: !Ref ScansourceAPI
       ParentId: !Ref ApiPathV1
-      PathPart: node
+      PathPart: stocks
 
   EndpointGetNode:
     Type: AWS::ApiGateway::Method
@@ -89,7 +217,8 @@ Resources:
       RestApiId: !Ref ScansourceAPI
       ResourceId: !Ref ApiPathNode
       HttpMethod: GET
-      AuthorizationType: NONE #TODO - COGNITO
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -101,14 +230,14 @@ Resources:
       FunctionName: !Ref Lambda1
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/* #TODO - security eval on path
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/GET/api/v1/stocks
 
   ApiPathPython:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref ScansourceAPI
       ParentId: !Ref ApiPathV1
-      PathPart: python
+      PathPart: weather
 
   EndpointGetPython:
     Type: AWS::ApiGateway::Method
@@ -116,7 +245,8 @@ Resources:
       RestApiId: !Ref ScansourceAPI
       ResourceId: !Ref ApiPathPython
       HttpMethod: GET
-      AuthorizationType: NONE #TODO - COGNITO
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -128,37 +258,160 @@ Resources:
       FunctionName: !Ref Lambda2
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/* #TODO - security eval on path
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ScansourceAPI}/*/GET/api/v1/weather
 
-  #2.4 - Deployment
+  #Deployment
   ApiDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - EndpointGetNode
       - EndpointGetPython
+      - ApiAuthorizer
     Properties:
       RestApiId: !Ref ScansourceAPI
-      Description: "API Gateway Deployment"
+      Description: "API Gateway Deployment with Cognito"
 
-  #2.5 - Stage
+  #Stage
   ApiStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref ScansourceAPI
       DeploymentId: !Ref ApiDeployment
       StageName: prod
       Description: "Production Stage for API Gateway"
+      CacheClusterEnabled: true
+      CacheClusterSize: "0.5"
+      MethodSettings:
+        - ResourcePath: /api/v1/stocks
+          HttpMethod: GET
+          CachingEnabled: true
+          CacheTtlInSeconds: 300
+          CacheDataEncrypted: true
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+        - ResourcePath: /api/v1/weather
+          HttpMethod: GET
+          CachingEnabled: true
+          CacheTtlInSeconds: 300
+          CacheDataEncrypted: true
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
 
-#3 - Outputs
+  #AWS Secrets Manager + Secrets
+  ApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Name: !Sub "${AWS::StackName}-alphavantage-api-key"
+      SecretString: !Sub '{"apiKey": "${AlphaVantageApiKey}"}'
+
+  #CloudWatch Alarms
+  Lambda1ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-Lambda1-Errors"
+      AlarmDescription: "Alert when NodeFunction has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref Lambda1
+      TreatMissingData: notBreaching
+
+  Lambda2ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-Lambda2-Errors"
+      AlarmDescription: "Alert when PythonFunction has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref Lambda2
+      TreatMissingData: notBreaching
+
+  ApiGateway5XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-API-5XX-Errors"
+      AlarmDescription: "Alert on API Gateway server errors"
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ScansourceAPI
+        - Name: Stage
+          Value: prod
+      TreatMissingData: notBreaching
+
 Outputs:
   ApiEndpointUrl:
     Description: "API Gateway endpoint URL"
     Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod"
 
-  NodeEndpoint:
-    Description: "Node function endpoint"
-    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/node"
+  StocksEndpoint:
+    Description: "Stocks function endpoint"
+    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/stocks"
 
-  PythonEndpoint:
-    Description: "Python function endpoint"
-    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/python"
+  WeatherEndpoint:
+    Description: "Weather function endpoint"
+    Value: !Sub "https://${ScansourceAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/api/v1/weather"
+
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID"
+    Value: !Ref UserPoolClient
+
+  UserPoolArn:
+    Description: "Cognito User Pool ARN"
+    Value: !GetAtt UserPool.Arn
+
+  Region:
+    Description: "AWS Region"
+    Value: !Ref AWS::Region
+
+  StackName:
+    Description: "CloudFormation Stack Name"
+    Value: !Ref AWS::StackName
+
+  ApiGatewayId:
+    Description: "API Gateway ID"
+    Value: !Ref ScansourceAPI
+
+  SecretArn:
+    Description: "Secrets Manager ARN for API key"
+    Value: !Ref ApiKeySecret
+
+  Lambda1LogGroup:
+    Description: "CloudWatch Log Group for NodeFunction"
+    Value: "/aws/lambda/NodeFunction"
+
+  Lambda2LogGroup:
+    Description: "CloudWatch Log Group for PythonFunction"
+    Value: "/aws/lambda/PythonFunction"
+
+  ApiGatewayLogGroup:
+    Description: "CloudWatch Log Group for API Gateway"
+    Value: !Sub "API-Gateway-Execution-Logs_${ScansourceAPI}/prod"
