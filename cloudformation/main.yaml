@@ -406,11 +406,11 @@ Outputs:
 
   Lambda1LogGroup:
     Description: "CloudWatch Log Group for NodeFunction"
-    Value: "/aws/lambda/NodeFunction"
+    Value: !Sub "/aws/lambda/${AWS::StackName}-NodeFunction"
 
   Lambda2LogGroup:
     Description: "CloudWatch Log Group for PythonFunction"
-    Value: "/aws/lambda/PythonFunction"
+    Value: !Sub "/aws/lambda/${AWS::StackName}-PythonFunction"
 
   ApiGatewayLogGroup:
     Description: "CloudWatch Log Group for API Gateway"
